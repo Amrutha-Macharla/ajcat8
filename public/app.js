@@ -942,6 +942,7 @@ function openAddProductModal() {
     const fileInp = document.getElementById('prod-file-input');
     if (fileInp) fileInp.value = "";
     updateImagePreview("");
+    setImgStatus("");
 
     onMetalTypeChange();
     recalculateModalLivePreview();
@@ -966,8 +967,15 @@ function openEditProductModal(prodId) {
     document.getElementById('prod-mc').value = p.mc || '';
     document.getElementById('prod-manual-mrp').value = p.manual_mrp || '';
     document.getElementById('prod-image-url').value = p.image_url || '';
+    const fileInp = document.getElementById('prod-file-input');
+    if (fileInp) fileInp.value = "";
 
     updateImagePreview(p.image_url);
+    if (p.image_url) {
+        setImgStatus("✓ Current Photo", "success");
+    } else {
+        setImgStatus("");
+    }
     onMetalTypeChange();
     recalculateModalLivePreview();
     openModal('product-modal');
@@ -1048,11 +1056,43 @@ function recalculateModalLivePreview() {
     document.getElementById('preview-breakdown-code').textContent = ''; // Removed [VA | MC]
 }
 
+let currentImageUploadPromise = null;
+
+function setImgStatus(text, type = 'info') {
+    const statusEl = document.getElementById('prod-img-status');
+    const msgEl = document.getElementById('prod-img-upload-msg');
+    const spinner = document.getElementById('prod-img-spinner');
+    
+    if (spinner) {
+        if (type === 'loading') spinner.classList.remove('hidden');
+        else spinner.classList.add('hidden');
+    }
+    
+    if (statusEl) {
+        if (type === 'loading') {
+            statusEl.className = 'text-xs font-semibold text-amber-600 animate-pulse flex items-center gap-1';
+            statusEl.textContent = text;
+        } else if (type === 'success') {
+            statusEl.className = 'text-xs font-semibold text-emerald-600 flex items-center gap-1';
+            statusEl.textContent = text;
+        } else if (type === 'error') {
+            statusEl.className = 'text-xs font-semibold text-rose-600 flex items-center gap-1';
+            statusEl.textContent = text;
+        } else {
+            statusEl.className = 'text-xs font-semibold text-slate-500';
+            statusEl.textContent = text;
+        }
+    }
+    if (msgEl) {
+        msgEl.textContent = (type === 'error' || type === 'warn') ? text : '';
+    }
+}
+
 function updateImagePreview(url) {
     const imgEl = document.getElementById('prod-img-preview');
     const placeholder = document.getElementById('prod-img-placeholder');
-    if (url) {
-        imgEl.src = url;
+    if (url && url.trim()) {
+        imgEl.src = url.trim();
         imgEl.classList.remove('hidden');
         placeholder.classList.add('hidden');
     } else {
@@ -1062,123 +1102,200 @@ function updateImagePreview(url) {
     }
 }
 
+async function uploadImageFile(file) {
+    if (!file) return null;
+
+    setImgStatus("Uploading photo...", "loading");
+
+    // 1. Try Cloudinary direct upload if configured
+    if (state.cloudinaryName && state.cloudinaryPreset) {
+        const rawPreset = state.cloudinaryPreset.trim();
+        const presetsToTry = [
+            rawPreset,
+            rawPreset.replace(/\s+/g, '_'),
+            rawPreset.replace(/\s+/g, '-'),
+            rawPreset.replace(/\s+/g, '')
+        ];
+        const uniquePresets = [...new Set(presetsToTry)];
+
+        for (const preset of uniquePresets) {
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('upload_preset', preset);
+                if (state.cloudinaryKey) formData.append('api_key', state.cloudinaryKey);
+
+                const uploadUrl = `https://api.cloudinary.com/v1_1/${state.cloudinaryName}/image/upload`;
+                const clRes = await fetch(uploadUrl, { method: 'POST', body: formData });
+                const clData = await clRes.json();
+                
+                if (clData.secure_url) {
+                    const finalUrl = clData.secure_url;
+                    document.getElementById('prod-image-url').value = finalUrl;
+                    updateImagePreview(finalUrl);
+                    setImgStatus("✓ Uploaded to Cloudinary", "success");
+                    if (preset !== state.cloudinaryPreset) {
+                        state.cloudinaryPreset = preset;
+                        localStorage.setItem('aj_cloudinary_preset', preset);
+                        fetch('/api/settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ cloudinary_preset: preset })
+                        }).catch(() => {});
+                    }
+                    return finalUrl;
+                } else if (clData.error) {
+                    console.warn(`Cloudinary preset "${preset}" returned error:`, clData.error.message);
+                }
+            } catch (err) {
+                console.warn("Cloudinary upload failed with network error:", err);
+            }
+        }
+    }
+
+    // 2. Fallback to local server upload (/api/upload)
+    setImgStatus("Saving to local server...", "loading");
+    try {
+        const base64Data = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result);
+            reader.onerror = (e) => reject(e);
+            reader.readAsDataURL(file);
+        });
+
+        const res = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                filename: `product_${Date.now()}_${file.name}`,
+                image_data: base64Data
+            })
+        });
+        const data = await res.json();
+        if (data.success && data.url) {
+            document.getElementById('prod-image-url').value = data.url;
+            updateImagePreview(data.url);
+            setImgStatus("✓ Saved locally", "success");
+            return data.url;
+        } else {
+            document.getElementById('prod-image-url').value = base64Data;
+            updateImagePreview(base64Data);
+            setImgStatus("✓ Captured", "success");
+            return base64Data;
+        }
+    } catch (err) {
+        console.error("Local image upload fallback error:", err);
+        setImgStatus("Upload failed", "error");
+        return null;
+    }
+}
+
 async function handleImageFileSelect(e) {
     const file = e.target.files[0];
     if (!file) return;
 
-    // Check Cloudinary direct upload
-    if (state.cloudinaryName && state.cloudinaryPreset) {
-        try {
-            const formData = new FormData();
-            formData.append('file', file);
-            formData.append('upload_preset', state.cloudinaryPreset);
-            if (state.cloudinaryKey) formData.append('api_key', state.cloudinaryKey);
+    // Instant local preview in 0 milliseconds
+    try {
+        const previewUrl = URL.createObjectURL(file);
+        updateImagePreview(previewUrl);
+    } catch (err) {}
 
-            const uploadUrl = `https://api.cloudinary.com/v1_1/${state.cloudinaryName}/image/upload`;
-            const clRes = await fetch(uploadUrl, { method: 'POST', body: formData });
-            const clData = await clRes.json();
-            
-            if (clData.secure_url) {
-                document.getElementById('prod-image-url').value = clData.secure_url;
-                updateImagePreview(clData.secure_url);
-                return;
-            }
-        } catch (err) {
-            console.warn("Cloudinary direct upload fallback:", err);
-        }
-    }
-
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-        const base64Data = event.target.result;
-        updateImagePreview(base64Data);
-
-        try {
-            const res = await fetch('/api/upload', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    filename: `product_${Date.now()}_${file.name}`,
-                    image_data: base64Data
-                })
-            });
-            const data = await res.json();
-            if (data.success) {
-                document.getElementById('prod-image-url').value = data.url;
-            }
-        } catch (err) {
-            document.getElementById('prod-image-url').value = base64Data;
-        }
-    };
-    reader.readAsDataURL(file);
+    currentImageUploadPromise = uploadImageFile(file);
+    await currentImageUploadPromise;
+    currentImageUploadPromise = null;
 }
 
 async function handleSaveProduct(e) {
     e.preventDefault();
     
-    const prodId = document.getElementById('prod-id').value || ('prod_' + Date.now().toString(36));
-    const code = document.getElementById('prod-code').value.trim() || generateNextProductCode();
-    const category_id = document.getElementById('prod-category').value;
-    const metal_type = document.getElementById('prod-metal').value;
-    const carats = document.getElementById('prod-carats').value;
-    const item_wt = document.getElementById('prod-item-wt').value;
-    const net_wt = document.getElementById('prod-net-wt').value;
-    const stone_cost = document.getElementById('prod-stone-cost').value;
-    const va_percent = document.getElementById('prod-va').value;
-    const mc = document.getElementById('prod-mc').value;
-    const manual_mrp = document.getElementById('prod-manual-mrp').value;
-    const image_url = document.getElementById('prod-image-url').value || '';
-
-    const catObj = state.categories.find(c => c.id === category_id);
-    const category_name = catObj ? catObj.name : 'General';
-
-    const pricing = calculatePricing({ metalType: metal_type, carats, itemWt: item_wt, netWt: net_wt, stoneCost: stone_cost, vaPercent: va_percent, mc, manualMrp: manual_mrp });
-
-    const payload = {
-        id: prodId,
-        code, category_id, category_name, metal_type, carats,
-        item_wt: parseFloat(item_wt) || 0,
-        net_wt: parseFloat(net_wt) || 0,
-        stone_cost: parseFloat(stone_cost) || 0,
-        va_percent: parseFloat(va_percent) || 0,
-        mc: parseFloat(mc) || 0,
-        manual_mrp: parseFloat(manual_mrp) || 0,
-        mrp: pricing.mrp,
-        price_code: pricing.priceCode,
-        breakdown_code: pricing.breakdownCode,
-        image_url
-    };
-
-    // Update state directly
-    const existingIdx = state.products.findIndex(p => p.id === prodId);
-    if (existingIdx >= 0) {
-        state.products[existingIdx] = payload;
-    } else {
-        state.products.unshift(payload);
+    const saveBtn = document.getElementById('save-product-btn');
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving...";
     }
 
-    // Save to local server
     try {
-        await fetch('/api/products', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-    } catch (err) {}
+        // If an upload is currently in progress, wait for it!
+        if (currentImageUploadPromise) {
+            setImgStatus("Completing image upload...", "loading");
+            await currentImageUploadPromise;
+        }
 
-    // Save to Firebase RTDB
-    if (state.firebaseUrl) {
+        // If photo URL is still empty but user has selected a file in the input, upload it now!
+        let image_url = (document.getElementById('prod-image-url').value || '').trim();
+        const fileInp = document.getElementById('prod-file-input');
+        if (!image_url && fileInp && fileInp.files && fileInp.files[0]) {
+            image_url = await uploadImageFile(fileInp.files[0]) || '';
+        }
+
+        const prodId = document.getElementById('prod-id').value || ('prod_' + Date.now().toString(36));
+        const code = document.getElementById('prod-code').value.trim() || generateNextProductCode();
+        const category_id = document.getElementById('prod-category').value;
+        const metal_type = document.getElementById('prod-metal').value;
+        const carats = document.getElementById('prod-carats').value;
+        const item_wt = document.getElementById('prod-item-wt').value;
+        const net_wt = document.getElementById('prod-net-wt').value;
+        const stone_cost = document.getElementById('prod-stone-cost').value;
+        const va_percent = document.getElementById('prod-va').value;
+        const mc = document.getElementById('prod-mc').value;
+        const manual_mrp = document.getElementById('prod-manual-mrp').value;
+
+        const catObj = state.categories.find(c => c.id === category_id);
+        const category_name = catObj ? catObj.name : 'General';
+
+        const pricing = calculatePricing({ metalType: metal_type, carats, itemWt: item_wt, netWt: net_wt, stoneCost: stone_cost, vaPercent: va_percent, mc, manualMrp: manual_mrp });
+
+        const payload = {
+            id: prodId,
+            code, category_id, category_name, metal_type, carats,
+            item_wt: parseFloat(item_wt) || 0,
+            net_wt: parseFloat(net_wt) || 0,
+            stone_cost: parseFloat(stone_cost) || 0,
+            va_percent: parseFloat(va_percent) || 0,
+            mc: parseFloat(mc) || 0,
+            manual_mrp: parseFloat(manual_mrp) || 0,
+            mrp: pricing.mrp,
+            price_code: pricing.priceCode,
+            breakdown_code: pricing.breakdownCode,
+            image_url
+        };
+
+        // Update state directly
+        const existingIdx = state.products.findIndex(p => p.id === prodId);
+        if (existingIdx >= 0) {
+            state.products[existingIdx] = payload;
+        } else {
+            state.products.unshift(payload);
+        }
+
+        // Save to local server
         try {
-            const cleanUrl = state.firebaseUrl.replace(/\/+$/, '');
-            await fetch(`${cleanUrl}/products/${prodId}.json`, {
-                method: 'PUT',
+            await fetch('/api/products', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-        } catch (e) {}
-    }
+        } catch (err) {}
 
-    closeModal('product-modal');
-    renderAll();
+        // Save to Firebase RTDB
+        if (state.firebaseUrl) {
+            try {
+                const cleanUrl = state.firebaseUrl.replace(/\/+$/, '');
+                await fetch(`${cleanUrl}/products/${prodId}.json`, {
+                    method: 'PUT',
+                    body: JSON.stringify(payload)
+                });
+            } catch (e) {}
+        }
+
+        closeModal('product-modal');
+        renderAll();
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save Product";
+        }
+    }
 }
 
 async function handleDeleteProduct(prodId) {
