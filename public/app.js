@@ -622,7 +622,10 @@ function renderCategoryShowcase() {
                             <div class="flex items-center justify-between">
                                 <div class="flex items-center gap-2">
                                     <span class="text-base font-bold text-brand-600 font-mono tracking-tight">${p.code}</span>
-                                    <button type="button" onclick="event.stopPropagation(); handleMoreClick('${p.code}')" class="px-2.5 py-0.5 text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition border border-slate-200 cursor-pointer shadow-2xs">More</button>
+                                    <button type="button" onclick="event.stopPropagation(); handleMoreClick('${p.code}')" class="flex items-center gap-1 px-2.5 py-0.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition shadow-2xs cursor-pointer">
+                                        <i data-lucide="calculator" class="w-3.5 h-3.5 text-amber-700"></i>
+                                        <span>Estimation</span>
+                                    </button>
                                 </div>
                                 <span class="text-xs font-semibold text-brand-800 bg-blue-50 border border-blue-200 px-2.5 py-0.5 rounded uppercase">${displayMetal}</span>
                             </div>
@@ -1574,6 +1577,11 @@ let targetEstimationProductCode = null;
 
 function handleMoreClick(prodCode) {
     targetEstimationProductCode = prodCode;
+    // If admin is logged in OR estimation was already unlocked in this session, open directly!
+    if (state.authToken || sessionStorage.getItem('aj_estimation_unlocked') === 'true') {
+        openEstimationModal(prodCode);
+        return;
+    }
     const pinInput = document.getElementById('security-pin-input');
     const errorMsg = document.getElementById('pin-error-msg');
     
@@ -1635,6 +1643,7 @@ function verifyAndUnlockPin(val) {
     const expectedPin = String(state.estimationPin || DEFAULT_ESTIMATION_PIN).trim();
 
     if (val === expectedPin) {
+        sessionStorage.setItem('aj_estimation_unlocked', 'true');
         closeModal('pin-modal');
         const code = targetEstimationProductCode;
         if (code) {
@@ -1737,4 +1746,115 @@ function openEstimationModal(prodCode) {
     document.getElementById('est-final-price').textContent = `₹${finalTotal.toLocaleString('en-IN')}`;
 
     openModal('estimation-modal');
+}
+
+// ==========================================
+// QUICK ESTIMATOR MODAL FUNCTIONS
+// ==========================================
+function openQuickEstimatorModal(prodCode = null) {
+    // Populate product dropdown
+    const select = document.getElementById('qe-product-select');
+    if (select) {
+        select.innerHTML = '<option value="">-- Custom Manual Estimation --</option>' +
+            state.products.map(p => `<option value="${p.code}">${p.code} - ${p.category_name} (${p.metal_type} ${p.carats || ''})</option>`).join('');
+        if (prodCode) {
+            select.value = prodCode;
+        } else {
+            select.value = "";
+        }
+    }
+
+    if (prodCode) {
+        onQuickEstimatorProductSelect();
+    } else {
+        // Default to Gold 22k
+        document.getElementById('qe-metal-select').value = "gold_22k";
+        onQeMetalChange();
+        document.getElementById('qe-gross-wt').value = "";
+        document.getElementById('qe-net-wt').value = "";
+        document.getElementById('qe-va-percent').value = "12";
+        document.getElementById('qe-mc').value = "500";
+        document.getElementById('qe-stone-cost').value = "";
+        recalculateQuickEstimation();
+    }
+
+    openModal('quick-estimator-modal');
+}
+
+function onQuickEstimatorProductSelect() {
+    const code = document.getElementById('qe-product-select').value;
+    if (!code) {
+        recalculateQuickEstimation();
+        return;
+    }
+    const p = state.products.find(x => x.code === code);
+    if (!p) return;
+
+    // Set metal
+    const metal = (p.metal_type || 'Gold').toLowerCase();
+    const caratStr = (p.carats || '').toLowerCase();
+    const select = document.getElementById('qe-metal-select');
+    if (metal === 'gold') {
+        select.value = caratStr.includes('18') ? 'gold_18k' : 'gold_22k';
+    } else if (metal === 'silver') {
+        select.value = (caratStr.includes('92.5') || caratStr.includes('sterling')) ? 'sterling_925' : 'silver';
+    } else {
+        select.value = 'gold_coating';
+    }
+
+    onQeMetalChange();
+
+    document.getElementById('qe-gross-wt').value = p.item_wt || '';
+    document.getElementById('qe-net-wt').value = p.net_wt || p.item_wt || '';
+    document.getElementById('qe-va-percent').value = p.va_percent || '0';
+    document.getElementById('qe-mc').value = p.mc || '0';
+    document.getElementById('qe-stone-cost').value = p.stone_cost || '0';
+
+    recalculateQuickEstimation();
+}
+
+function onQeMetalChange() {
+    const metalKey = document.getElementById('qe-metal-select').value;
+    let rate = 14700;
+    const r = state.rates.find(x => x.id === metalKey);
+    if (r) rate = r.rate;
+    document.getElementById('qe-metal-rate').value = rate;
+    recalculateQuickEstimation();
+}
+
+function onQeGrossWtInput() {
+    const gross = document.getElementById('qe-gross-wt').value;
+    const netInput = document.getElementById('qe-net-wt');
+    if (!netInput.value || netInput.value === '0') {
+        netInput.value = gross;
+    }
+    recalculateQuickEstimation();
+}
+
+function recalculateQuickEstimation() {
+    const rate = parseFloat(document.getElementById('qe-metal-rate').value) || 0;
+    const gross = parseFloat(document.getElementById('qe-gross-wt').value) || 0;
+    let net = parseFloat(document.getElementById('qe-net-wt').value) || 0;
+    if (net === 0 && gross > 0) net = gross;
+
+    const va = parseFloat(document.getElementById('qe-va-percent').value) || 0;
+    const mc = parseFloat(document.getElementById('qe-mc').value) || 0;
+    const stone = parseFloat(document.getElementById('qe-stone-cost').value) || 0;
+
+    const vaWt = parseFloat((net * (va / 100)).toFixed(2));
+    const totalWt = parseFloat((net + vaWt).toFixed(2));
+    const metalValue = Math.round(totalWt * rate);
+    const finalTotal = Math.round(metalValue + mc + stone);
+
+    const step1El = document.getElementById('qe-step-1');
+    const step2El = document.getElementById('qe-step-2');
+    const step3El = document.getElementById('qe-step-3');
+    const totalEl = document.getElementById('qe-total-price');
+    const codeEl = document.getElementById('qe-codeword');
+
+    if (step1El) step1El.innerHTML = `1. Weight + VA (${va}%): ${net}g + ${vaWt}g = <span class="text-blue-600 font-bold">${totalWt}g</span>`;
+    if (step2El) step2El.innerHTML = `2. Metal Value (@ ₹${rate}/g): ${totalWt}g × ₹${rate} = <span class="text-blue-600 font-bold">₹${metalValue.toLocaleString('en-IN')}</span>`;
+    if (step3El) step3El.innerHTML = `3. Making & Stones: MC: ₹${mc.toLocaleString('en-IN')}${stone > 0 ? ` + Stones: ₹${stone.toLocaleString('en-IN')}` : ''}`;
+    if (totalEl) totalEl.textContent = `₹${finalTotal.toLocaleString('en-IN')}`;
+    if (codeEl) codeEl.textContent = encodeCodeword(finalTotal);
 }
