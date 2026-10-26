@@ -132,6 +132,7 @@ def init_db():
         cursor.execute("INSERT INTO settings (key, value) VALUES ('cloudinary_name', 'df4dmpyg2')")
         cursor.execute("INSERT INTO settings (key, value) VALUES ('cloudinary_preset', 'asp catalogue')")
         cursor.execute("INSERT INTO settings (key, value) VALUES ('cloudinary_key', '')")
+        cursor.execute("INSERT INTO settings (key, value) VALUES ('estimation_pin', '5473')")
 
     conn.commit()
     conn.close()
