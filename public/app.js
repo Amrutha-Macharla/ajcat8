@@ -87,18 +87,38 @@ async function loadInitialData() {
         // Sync strictly and completely from connected Firebase Realtime Database
         if (state.firebaseUrl) {
             await trySyncFromFirebase();
-        } else {
-            // Local fallback only if Firebase URL is not configured
-            const [ratesRes, catsRes, prodsRes] = await Promise.all([
-                fetch('/api/rates').then(r => r.json()).catch(() => ({ success: false })),
-                fetch('/api/categories').then(r => r.json()).catch(() => ({ success: false })),
-                fetch('/api/products').then(r => r.json()).catch(() => ({ success: false }))
-            ]);
-
-            if (ratesRes.success && ratesRes.rates && ratesRes.rates.length > 0) state.rates = ratesRes.rates;
-            if (catsRes.success && catsRes.categories) state.categories = catsRes.categories;
-            if (prodsRes.success && prodsRes.products) state.products = prodsRes.products;
         }
+
+        // If products or categories are empty (e.g. Firebase is brand new or offline), fallback to local SQLite
+        if (!state.products || state.products.length === 0) {
+            const prodsRes = await fetch('/api/products').then(r => r.json()).catch(() => ({ success: false }));
+            if (prodsRes.success && prodsRes.products && prodsRes.products.length > 0) {
+                state.products = prodsRes.products;
+            }
+        }
+        if (!state.categories || state.categories.length === 0) {
+            const catsRes = await fetch('/api/categories').then(r => r.json()).catch(() => ({ success: false }));
+            if (catsRes.success && catsRes.categories && catsRes.categories.length > 0) {
+                state.categories = catsRes.categories;
+            }
+        }
+        if (!state.rates || state.rates.length === 0) {
+            const ratesRes = await fetch('/api/rates').then(r => r.json()).catch(() => ({ success: false }));
+            if (ratesRes.success && ratesRes.rates && ratesRes.rates.length > 0) {
+                state.rates = ratesRes.rates;
+            }
+        }
+
+        // Ensure every product's category exists in state.categories
+        state.products.forEach(p => {
+            if (p.category_id && !state.categories.some(c => c.id === p.category_id)) {
+                state.categories.push({
+                    id: p.category_id,
+                    name: p.category_name || 'General',
+                    icon_letter: (p.category_name || 'G')[0].toUpperCase()
+                });
+            }
+        });
 
         // Ensure default rates exist if rates are missing
         if (!state.rates || state.rates.length === 0) state.rates = [...DEFAULT_RATES];
